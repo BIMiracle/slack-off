@@ -46,6 +46,7 @@ struct App {
     void AddTray();
     void TrayMenu();
     HWND BestWindow(size_t index);
+    bool CheckWindowAccess(size_t index, HWND target);
     bool HideWindows(size_t index);
     void BeginHide(size_t index);
     void FinishHide();
@@ -332,29 +333,43 @@ HWND App::BestWindow(size_t index) {
 bool App::HideWindows(size_t index) {
     auto& rule = config.rules[index];
     bool success = true;
+    bool accessDenied = false, journalFailed = false;
     auto windows = TargetWindows(rule.path);
     for (auto target : windows) {
+        if (WindowRequiresElevation(target)) { accessDenied = true; success = false; continue; }
         auto existing = std::find_if(rule.snapshots.begin(), rule.snapshots.end(), [&](const Snapshot& snap) { return snap.window == target && ValidSnapshot(snap); });
         if (existing != rule.snapshots.end()) { ShowWindowAsync(target, SW_HIDE); continue; }
         Snapshot snap;
-        if (!CaptureWindow(target, snap)) { success = false; continue; }
+        SetLastError(ERROR_SUCCESS);
+        if (!CaptureWindow(target, snap)) { accessDenied = accessDenied || GetLastError() == ERROR_ACCESS_DENIED; success = false; continue; }
         rule.snapshots.push_back(snap);
         // Commit the recovery identity and placement before touching visibility.
         if (!settings.SaveJournal(config.rules)) {
-            rule.snapshots.pop_back(); RemovePropW(target, RecoveryProperty); success = false; continue;
+            rule.snapshots.pop_back(); RemovePropW(target, RecoveryProperty); journalFailed = true; success = false; continue;
         }
         ShowWindowAsync(target, SW_HIDE);
     }
     rule.hidden = !rule.snapshots.empty();
     rule.status = success ? L"已隐藏 · 托盘隐藏未支持" : L"部分窗口隐藏失败 · 托盘隐藏未支持";
-    if (!rule.hidden) rule.status = L"未找到可隐藏窗口或权限不足 · 托盘隐藏未支持";
-    if (rule.hidden && !keyConfirmed) rule.status = L"隐藏成功，按键发送未确认 · 托盘隐藏未支持";
+    if (!rule.hidden) rule.status = windows.empty() ? L"目标程序没有可见窗口 · 托盘隐藏未支持" : L"无法记录目标窗口，隐藏未执行 · 托盘隐藏未支持";
+    if (journalFailed) rule.status = L"无法保存恢复记录，部分窗口未隐藏 · 托盘隐藏未支持";
+    if (accessDenied) rule.status = L"权限不足，请点击“以管理员身份重启” · 托盘隐藏未支持";
+    if (success && rule.hidden && !keyConfirmed) rule.status = L"隐藏成功，按键发送未确认 · 托盘隐藏未支持";
     return success && rule.hidden;
+}
+bool App::CheckWindowAccess(size_t index, HWND target) {
+    if (!WindowRequiresElevation(target)) return true;
+    if (watchRule == static_cast<int>(index)) StopMonitoring(true);
+    auto& rule = config.rules[index];
+    rule.status = L"目标程序权限高于 SlackOff，请点击“以管理员身份重启” · 托盘隐藏未支持";
+    RefreshList(); Notify(rule.status);
+    return false;
 }
 void App::BeginHide(size_t index) {
     if (pendingRule >= 0) { Notify(L"正在执行隐藏，请稍候。"); return; }
     auto target = BestWindow(index);
     if (!target) { Notify(L"目标程序没有可见窗口。"); if (watchRule == static_cast<int>(index)) StopMonitoring(true); return; }
+    if (!CheckWindowAccess(index, target)) return;
     pendingRule = static_cast<int>(index); pendingWindow = target;
     config.rules[index].recent = target;
     pendingSent = false; keyConfirmed = true; pendingStarted = GetTickCount64(); hideAt = 0;
@@ -366,7 +381,9 @@ void App::FinishHide() {
     if (pendingRule < 0) return;
     KillTimer(window, PendingTimer);
     int index = pendingRule; pendingRule = -1;
-    HideWindows(static_cast<size_t>(index)); RefreshList(); Notify(config.rules[index].status);
+    HideWindows(static_cast<size_t>(index));
+    if (!config.rules[index].hidden && watchRule == index) StopMonitoring(true);
+    RefreshList(); Notify(config.rules[index].status);
 }
 bool App::Restore(size_t index) {
     auto& rule = config.rules[index];
@@ -406,6 +423,7 @@ void App::ResumeMonitoring() {
     watchWindow = BestWindow(static_cast<size_t>(watchRule));
     inside = false; exitQueued = false;
     if (!watchWindow || IsIconic(watchWindow) || !IsWindowVisible(watchWindow)) { StopMonitoring(true); return; }
+    if (!CheckWindowAccess(static_cast<size_t>(watchRule), watchWindow)) return;
     if (FAILED(DwmGetWindowAttribute(watchWindow, DWMWA_EXTENDED_FRAME_BOUNDS, &watchBounds, sizeof(watchBounds)))) GetWindowRect(watchWindow, &watchBounds);
     if (mouseHook) UnhookWindowsHookEx(mouseHook);
     mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseCallback, GetModuleHandleW(nullptr), 0);
@@ -650,6 +668,7 @@ int SelfTest(HINSTANCE instance) {
         std::vector<HWND> windows;
         for (int i = 0; i < 40; ++i) { windows = TargetWindows(exe); if (windows.size() == 2) break; Sleep(50); }
         check(windows.size() == 2, "multiple visible windows; originally hidden excluded");
+        check(!windows.empty() && !WindowRequiresElevation(windows[0]), "same-integrity target does not require elevation");
         std::vector<Snapshot> snapshots;
         for (auto target : windows) { Snapshot snap; if (CaptureWindow(target, snap)) snapshots.push_back(snap); }
         check(snapshots.size() == windows.size() && !snapshots.empty(), "capture identity and placement");
@@ -663,12 +682,19 @@ int SelfTest(HINSTANCE instance) {
             INPUT alt[2]{}; alt[0].type = alt[1].type = INPUT_KEYBOARD;
             alt[0].ki.wVk = alt[1].ki.wVk = VK_MENU; alt[1].ki.dwFlags = KEYEVENTF_KEYUP;
             SendInput(2, alt, sizeof(INPUT)); SetForegroundWindow(target); Sleep(80);
+            // Alt can leave the fixture's system menu active. Dismiss it before
+            // testing Space so the test key reaches the client window.
+            if (GetForegroundWindow() == target) {
+                alt[0].ki.wVk = alt[1].ki.wVk = VK_ESCAPE;
+                SendInput(2, alt, sizeof(INPUT)); Sleep(50);
+            }
             bool injected = SendBeforeKey(target, rule.before); Sleep(80);
             if (GetForegroundWindow() != target) {
                 report << "SKIP pre-hide input delivery: runner cannot give target foreground focus\n";
                 check(!injected, "input refuses delivery without foreground confirmation");
             } else {
                 check(injected, "pre-hide key input accepted");
+                for (int i = 0; injected && WindowText(target) != L"Paused" && i < 10; ++i) Sleep(50);
                 check(WindowText(target) == L"Paused", "pre-hide key reaches fixture");
             }
             config.rules[0].snapshots = snapshots;

@@ -3,6 +3,23 @@
 #include <algorithm>
 
 namespace slack {
+namespace {
+bool ProcessIntegrity(HANDLE process, DWORD& level) {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(process, TOKEN_QUERY, &token)) return false;
+    DWORD bytes = 0;
+    GetTokenInformation(token, TokenIntegrityLevel, nullptr, 0, &bytes);
+    std::vector<BYTE> buffer(bytes);
+    bool ok = bytes && GetTokenInformation(token, TokenIntegrityLevel, buffer.data(), bytes, &bytes);
+    if (ok) {
+        auto sid = reinterpret_cast<TOKEN_MANDATORY_LABEL*>(buffer.data())->Label.Sid;
+        ok = IsValidSid(sid) && *GetSidSubAuthorityCount(sid) > 0;
+        if (ok) level = *GetSidSubAuthority(sid, *GetSidSubAuthorityCount(sid) - 1);
+    }
+    CloseHandle(token);
+    return ok;
+}
+}
 std::wstring FullPath(const std::wstring& path) {
     wchar_t buffer[32768];
     DWORD n = GetFullPathNameW(path.c_str(), 32768, buffer, nullptr);
@@ -30,6 +47,16 @@ bool GetIdentity(HWND window, Identity& identity) {
     identity.path.assign(path, count);
     identity.started = (uint64_t(created.dwHighDateTime) << 32) | created.dwLowDateTime;
     return true;
+}
+bool WindowRequiresElevation(HWND window) {
+    DWORD pid = 0;
+    if (!GetWindowThreadProcessId(window, &pid)) return false;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return false; // Unknown access is reported by the actual capture operation.
+    DWORD targetLevel = 0, ownLevel = 0;
+    bool higher = ProcessIntegrity(process, targetLevel) && ProcessIntegrity(GetCurrentProcess(), ownLevel) && targetLevel > ownLevel;
+    CloseHandle(process);
+    return higher;
 }
 std::vector<HWND> TargetWindows(const std::wstring& path) {
     struct Context { const std::wstring* path; std::vector<HWND> windows; } context{&path, {}};

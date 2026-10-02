@@ -56,6 +56,7 @@ struct Config {
 std::wstring FullPath(const std::wstring& path);
 bool SamePath(const std::wstring& a, const std::wstring& b);
 bool GetIdentity(HWND window, Identity& identity);
+bool WindowRequiresElevation(HWND window);
 bool ValidSnapshot(const Snapshot& snapshot);
 std::vector<HWND> TargetWindows(const std::wstring& path);
 std::wstring WindowText(HWND window);

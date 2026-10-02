@@ -59,7 +59,7 @@ function Stop-App {
         if (!$taskApp.WaitForExit(3000)) { throw 'Test application did not exit normally.' }
     }
 }
-function Start-App([int]$watchKey) {
+function Start-App([int]$watchKey, [int]$watchModifiers = 3, [int]$watchSides = 10, [int]$toggleKey = 120, [int]$toggleSides = 5) {
     $taskConfig = @"
 [General]
 Version=2
@@ -69,8 +69,8 @@ Count=1
 [Rule0]
 Name=ShortcutPlayer
 Path=$taskFixtureExe
-Toggle=3,120,5
-Watch=3,$watchKey,10
+Toggle=3,$toggleKey,$toggleSides
+Watch=$watchModifiers,$watchKey,$watchSides
 Before=0,0,0
 Delay=0
 "@
@@ -85,8 +85,9 @@ Delay=0
     if ($taskHwnd -eq [IntPtr]::Zero) { throw 'Test application did not start.' }
     $taskList = [ShortcutTest]::GetDlgItem($taskHwnd,10)
     [void][ShortcutTest]::SendMessage($taskList,0x100,[IntPtr]0x24,[IntPtr]::Zero)
-    Check ([ShortcutTest]::Text([ShortcutTest]::GetDlgItem($taskHwnd,17)) -like '左Ctrl+左Alt+*') 'toggle field displays saved left modifiers'
-    $taskExpectedWatch = if ($watchKey -lt 0) { '左Ctrl+右Alt+*' } else { '右Ctrl+右Alt+*' }
+    $taskExpectedToggle = if ($toggleSides -eq 10) { '右Ctrl+右Alt+*' } else { '左Ctrl+左Alt+*' }
+    Check ([ShortcutTest]::Text([ShortcutTest]::GetDlgItem($taskHwnd,17)) -like $taskExpectedToggle) 'toggle field displays saved modifier sides'
+    $taskExpectedWatch = if ($watchKey -lt 0) { '左Ctrl+右Alt+*' } elseif ($watchModifiers -eq 1) { '右Alt+*' } else { '右Ctrl+右Alt+*' }
     Check ([ShortcutTest]::Text([ShortcutTest]::GetDlgItem($taskHwnd,18)) -like $taskExpectedWatch) 'watch field displays saved modifier sides'
     # Keep recording fields out of focus while exercising real global input.
     [void][ShortcutTest]::SendMessage($taskHwnd,0x10,[IntPtr]::Zero,[IntPtr]::Zero)
@@ -170,8 +171,25 @@ try {
     } else {
         $taskResults.Add('SKIP shortcut recording: runner cannot give settings foreground focus')
     }
+    # Reproduce the scrcpy rule: right Alt+M watches, right Ctrl+right Alt+M hides.
+    Stop-App
+    Start-App 77 1 8 77 10
+    [void][ShortcutTest]::SetForegroundWindow([ShortcutTest]::FindWindow('SlackOff.Fixture','Fixture A'))
+    [ShortcutTest]::Key(0xA4,$false); [ShortcutTest]::Key(0x4D,$false); [ShortcutTest]::Key(0x4D,$true); [ShortcutTest]::Key(0xA4,$true)
+    Start-Sleep -Milliseconds 150
+    Check ([ShortcutTest]::Watched($taskHwnd) -eq [IntPtr]::Zero) 'left Alt+M does not enable right-Alt watching'
+    [ShortcutTest]::Key(0xA5,$false); [ShortcutTest]::Key(0x4D,$false); [ShortcutTest]::Key(0x4D,$true); [ShortcutTest]::Key(0xA5,$true)
+    Start-Sleep -Milliseconds 200
+    Check ([ShortcutTest]::Watched($taskHwnd) -ne [IntPtr]::Zero -and [ShortcutTest]::Visible($taskFixture.Id) -eq 2) 'right Alt+M enables watching with the target focused'
+    [ShortcutTest]::Key(0xA5,$false); [ShortcutTest]::Key(0x4D,$false); [ShortcutTest]::Key(0x4D,$true); [ShortcutTest]::Key(0xA5,$true)
+    Start-Sleep -Milliseconds 150
+    Check ([ShortcutTest]::Watched($taskHwnd) -eq [IntPtr]::Zero) 'right Alt+M disables watching on the next press'
+    [ShortcutTest]::Chord(0xA3,0xA5,0x4D)
+    Check (Wait-Visible 0) 'right Ctrl+right Alt+M hides without enabling watching'
+    [ShortcutTest]::Chord(0xA3,0xA5,0x4D)
+    Check (Wait-Visible 2) 'right Ctrl+right Alt+M restores the shared M target'
 } finally {
-    foreach ($taskKey in @(0x78,0x79,0x7B,0xA1,0xA2,0xA3,0xA4,0xA5)) { [ShortcutTest]::Key($taskKey,$true) }
+    foreach ($taskKey in @(0x4D,0x78,0x79,0x7B,0xA1,0xA2,0xA3,0xA4,0xA5)) { [ShortcutTest]::Key($taskKey,$true) }
     if ($taskApp -and !$taskApp.HasExited) {
         [ShortcutTest]::Exit($taskHwnd)
         if (!$taskApp.WaitForExit(3000)) { Stop-Process -Id $taskApp.Id -Force }
