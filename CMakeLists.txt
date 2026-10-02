@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SlackOff VERSION 1.0.0 LANGUAGES CXX RC)
+project(SlackOff VERSION 0.1.0 LANGUAGES CXX RC)
 if(NOT WIN32 OR NOT MSVC)
   message(FATAL_ERROR "Use MSVC and the Windows SDK on Windows.")
 endif()
