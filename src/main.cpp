@@ -1,4 +1,5 @@
 #include "app.h"
+#include "resource.h"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -298,7 +299,7 @@ bool App::Save(bool generalOnly) {
 void App::AddTray() {
     NOTIFYICONDATAW tray{sizeof(tray)}; tray.hWnd = window; tray.uID = 1;
     tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; tray.uCallbackMessage = TrayMessage;
-    tray.hIcon = LoadIconW(nullptr, IDI_APPLICATION); wcscpy_s(tray.szTip, L"SlackOff · 快捷隐藏");
+    tray.hIcon = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICONSM)); wcscpy_s(tray.szTip, L"SlackOff · 快捷隐藏");
     Shell_NotifyIconW(NIM_ADD, &tray);
 }
 void App::TrayMenu() {
@@ -728,7 +729,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         state.settings.Save(state.config);
     }
     WNDCLASSEXW cls{sizeof(cls)}; cls.hInstance = instance; cls.lpfnWndProc = WindowProc; cls.lpszClassName = WindowClass;
-    cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); cls.hIcon = LoadIconW(nullptr, IDI_APPLICATION); cls.hIconSm = cls.hIcon;
+    cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    cls.hIcon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_SLACKOFF), IMAGE_ICON,
+        GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_SHARED));
+    cls.hIconSm = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_SLACKOFF), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED));
     cls.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1); RegisterClassExW(&cls);
     HWND window = CreateWindowExW(0, WindowClass, L"SlackOff · 轻量快捷隐藏", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(940, static_cast<int>(GetDpiForSystem()), 96), MulDiv(700, static_cast<int>(GetDpiForSystem()), 96), nullptr, nullptr, instance, nullptr);
